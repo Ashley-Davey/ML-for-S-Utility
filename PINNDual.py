@@ -43,9 +43,9 @@ class PINNDualSolver(object):
     def get_sample(self, size, area, final = False):
         
         if final:
-            y_points = np.linspace(self.config.y_range[0], self.config.y_range[1], size)
+            y_points = np.linspace(self.config.y_range_final[0], self.config.y_range_final[1], size)
         else:
-            y_points = rng.uniform(self.config.y_range[0], self.config.y_range[1], size)
+            y_points = rng.uniform(self.config.y_range_training[0], self.config.y_range_training[1], size)
             
         if area == 'boundary':
             t_points = np.ones(size) * self.config.T
@@ -83,24 +83,25 @@ class PINNDualSolver(object):
                 
                 while step < self.method.iteration_steps:
                     step+=1
-                    display = step % self.method.display_step == 0 or step == 1
-                    processes, boundary_function_data, loss = self.train_step(sample_data_final if display else sample_data)
+                    display = step % self.method.display_step == 0
+                    processes, boundary_function_data, loss = self.train_step(sample_data)
                                                 
                     data['M losses'].append(loss['M'].numpy())
-                    error_v = loss['M'].numpy()
-                    min_loss = min(min_loss, error_v)
+                    if not display and step < self.method.iteration_steps:
+                        error_v = loss['M'].numpy()
+                        min_loss = min(min_loss, error_v)
                     data['times' ].append(time.time() - self.start_time)
                     
-                    if error_v < 5e-5:
+                    if error_v < 1e-5 and self.method.iteration_steps > 10000:
                         raise ValueError('Low Loss')
                         
-                    if error_v > 100 * min_loss and step > self.method.iteration_steps / 4:
+                    if error_v > 100 * min_loss and step > self.method.iteration_steps / 4 and self.method.iteration_steps > 10000:
                         log(f'Spike at step {step}: {min_loss:.3e} -> {error_v:.3e}')
                         step = int(step - self.method.iteration_steps / 5)
                         min_loss = error_v
                         
         
-                    if step % self.method.display_step == 0 or step == 1:
+                    if display or step == 1:
                         log(f"Step: {step:6d} \t Time: {time.time() - self.start_time:5.2f} \t Loss: {error_v:.3e}")
 
                         if plot_mid or (plot_early and step == 1):
@@ -152,9 +153,7 @@ class PINNDualModel(tf.keras.Model):
         super(PINNDualModel, self).__init__()
         self.config = config
         self.subnet_M  = FeedForwardSubNet(fn = fn)
-        self.lam = tf.Variable(self.config.lam, trainable = False, dtype = tf.float64)
-        self.L = tf.Variable(self.config.lower, trainable = False, dtype = tf.float64)
-        self.R = tf.Variable(self.config.R, trainable = False, dtype = tf.float64)
+        self.R = tf.Variable(1.0, trainable = False, dtype = tf.float64)
 
     def collocation_loss(self, data, training, tape):
         
@@ -177,7 +176,7 @@ class PINNDualModel(tf.keras.Model):
         loss_M = tf.reduce_mean(
             tf.square(LM)
             + penalise_range(Myy, 1e-1, np.inf)
-            + penalise_range(My, -np.inf, -1e-3)
+            + penalise_range(My, -np.inf, -1e-4)
             ) 
         
                 
@@ -217,9 +216,9 @@ class PINNDualModel(tf.keras.Model):
         My  = tape.gradient(M , y_data)
 
         loss_M = 0.1 * tf.reduce_mean(
-            tf.square(M - self.config.u_tilde(y_data, self.lam, self.L, self.R))
-            # tf.square(M - self.config.u(y_data, self.lam, self.L, self.R))
-            + tf.square(My  - self.config.u_tildey(y_data, self.lam, self.L, self.R))
+            tf.square(M - self.config.u_tilde(y_data, self.R))
+            # tf.square(M - self.config.u(y_data, self.R))
+            # + tf.square(My  - self.config.u_tildey(y_data, self.R))
             ) 
         
         loss['M'] = loss_M                

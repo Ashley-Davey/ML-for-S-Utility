@@ -46,9 +46,9 @@ class PINNSolver(object):
     def get_sample(self, size, area, final = False):
         
         if final:
-            x_points = np.linspace(self.config.x_range[0], self.config.x_range[1], size)
+            x_points = np.linspace(self.config.x_range_final[0], self.config.x_range_final[1], size)
         else:
-            x_points = rng.uniform(self.config.x_sample[0], self.config.x_sample[1], size)
+            x_points = rng.uniform(self.config.x_range_training[0], self.config.x_range_training[1], size)
             
         if area == 'boundary':
             t_points = np.ones(size) * self.config.T
@@ -61,7 +61,7 @@ class PINNSolver(object):
                 t_points = rng.uniform(0, self.config.T, size) 
         elif area == 'time':
                 t_points = np.linspace(0, self.config.T, size) 
-                x_points = np.zeros(size) * self.config.x_sample[0]
+                x_points = np.ones(size) * self.config.x_range_training[0]
         else:
             raise ValueError('Bad area')
             
@@ -89,22 +89,23 @@ class PINNSolver(object):
                 sample_data_final = self.sample(final = True)
                 while step < self.method.iteration_steps:
                     step+=1
-                    display = step % self.method.display_step == 0 or step == 1
+                    display = step % self.method.display_step == 0
                     
                     
                     
-                    processes, boundary_function_data, loss = self.train_step(sample_data_final if display else sample_data)
+                    processes, boundary_function_data, loss = self.train_step(sample_data)
                     
                     
                                                 
                     data['M losses'].append(loss['M'].numpy())
-                    error_v = loss['M'].numpy()
-                    min_loss = min(min_loss, error_v)
+                    if not display and step < self.method.iteration_steps:
+                        error_v = loss['M'].numpy()
+                        min_loss = min(min_loss, error_v)
                         
-                    if error_v < 5e-5:
+                    if error_v < 1e-5 and self.method.iteration_steps > 10000:
                         raise ValueError('Low Loss')
                                             
-                    if error_v > 10 * min_loss and step > self.method.iteration_steps / 4:
+                    if error_v > 10 * min_loss and step > self.method.iteration_steps / 4 and self.method.iteration_steps > 10000:
                         log(f'Spike at step {step}: {min_loss:.3e} -> {error_v:.3e}')
                         step = int(step - self.method.iteration_steps / 5)
                         min_loss = error_v
@@ -115,7 +116,7 @@ class PINNSolver(object):
                     data['times' ].append(time.time() - self.start_time)
                     
         
-                    if display:
+                    if display or step == 1:
                         log(f"Step: {step:6d} \t Time: {time.time() - self.start_time:5.2f} \t Loss: {error_v:.3e}")
                         
                         if plot_mid or (plot_early and step == 1):
@@ -167,9 +168,7 @@ class PINNModel(tf.keras.Model):
         super(PINNModel, self).__init__()
         self.subnet_M  = FeedForwardSubNet(fn = fn)
         self.config = config
-        self.lam = tf.Variable(self.config.lam, trainable = False, dtype = tf.float64)
-        self.L = tf.Variable(self.config.lower, trainable = False, dtype = tf.float64)
-        self.R = tf.Variable(self.config.R, trainable = False, dtype = tf.float64)
+        self.R = tf.Variable(1.0, trainable = False, dtype = tf.float64)
                     
     def collocation_loss(self, data, training, tape):
         
@@ -201,7 +200,7 @@ class PINNModel(tf.keras.Model):
             ) 
         
         # loss_M = 0.1 * tf.reduce_mean(
-        #     tf.square(M - self.config.u_nonconcave(x_data, self.lam, self.L, self.R ))
+        #     tf.square(M - self.config.u_nonconcave(x_data, self.R ))
         #     + tf.square(Mx  - self.config.u_nonconcavex(x_data, self.R))
         #     ) 
                         
@@ -234,7 +233,7 @@ class PINNModel(tf.keras.Model):
         
                     
         loss_time =  tf.reduce_mean(
-            tf.square(M - self.config.u(x_data, self.lam, self.L, self.R ))
+            tf.square(M - self.config.u(x_data, self.R ))
             ) 
         loss['M'] = loss_time                
                     
@@ -256,13 +255,13 @@ class PINNModel(tf.keras.Model):
 
         if self.config.non_concave:
             loss_M = 0.1 * tf.reduce_mean(
-                tf.square(M - self.config.u_nonconcave(x_data, self.lam, self.L, self.R ))
+                tf.square(M - self.config.u_nonconcave(x_data, self.R ))
                 + tf.square(Mx  - self.config.u_nonconcavex(x_data, self.R))
                 ) 
         else:
             loss_M = 0.1 * tf.reduce_mean(
-                tf.square(M - self.config.u(x_data, self.lam, self.L, self.R ))
-                + tf.square(Mx  - self.config.ux (x_data, self.lam, self.L, self.R ))
+                tf.square(M - self.config.u(x_data, self.R ))
+                + tf.square(Mx  - self.config.ux (x_data, self.R ))
                 ) 
         
         loss['M'] = loss_M                
@@ -288,10 +287,10 @@ class PINNModel(tf.keras.Model):
             
             if 'boundary' in sample_data.keys():
                 boundary_data = tf.convert_to_tensor(sample_data['boundary'], dtype=tf.float64)
-                boundary_loss, boundary_function_data = self.boundary_loss(boundary_data,training, tape)   
+                boundary_loss, boundary_function_data = self.boundary_loss(boundary_data,training, tape)
                 loss['M'] += boundary_loss['M']
                 
-            if 'time' in sample_data.keys():
+            if 'time' in sample_data.keys() and self.config.x_range_training[0] < 0.1:
                 time_data = tf.convert_to_tensor(sample_data['time'], dtype=tf.float64)
                 time_loss = self.time_loss(time_data,training, tape)   
                 loss['M']  += time_loss['M'] 
@@ -299,6 +298,7 @@ class PINNModel(tf.keras.Model):
             grads = {
                 'M' : tape.gradient(loss['M' ], self.subnet_M .trainable_variables),
                 }     
+            
 
 
             
